@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Peer messaging between running Claude Code and Codex CLI sessions.
+
+Claude->Claude is native (Claude's own peer tools), so this only fills the gaps:
+  Claude -> Codex : `codex queue` into the live thread
+  Codex  -> Claude: append to an inbox file the Claude session tails with a Monitor
+"""
+import glob, json, os, subprocess, sys, time, pathlib
+
+CLAUDE_SESSIONS = os.path.expanduser("~/.claude/sessions")
+CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
+CODEX_INDEX = os.path.expanduser("~/.codex/session_index.jsonl")
+INBOX = pathlib.Path("/tmp/cc-bridge")
+
+
+def _run(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+
+def claude_peers():
+    """Live Claude sessions: registry entry whose peer socket still exists."""
+    out = {}
+    for f in glob.glob(f"{CLAUDE_SESSIONS}/*.json"):
+        try:
+            d = json.load(open(f))
+        except Exception:
+            continue
+        sock = d.get("messagingSocketPath")
+        if sock and os.path.exists(sock) and d.get("name"):
+            out[d["name"]] = {"pid": d["pid"], "cwd": d.get("cwd"), "status": d.get("status")}
+    return out
+
+
+def _thread_names():
+    names = {}
+    try:
+        for line in open(CODEX_INDEX):
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("thread_name"):
+                names[d["id"]] = d["thread_name"]
+    except Exception:
+        pass
+    return names
+
+
+
+
+def codex_peers():
+    """Live Codex TUIs, matched to their thread by process start time."""
+    out = {}
+    names = _thread_names()
+    for pid in _run("pgrep", "-f", "bin/codex( |$)").split():  # BSD regex, no \s
+        lstart = _run("ps", "-p", pid, "-o", "lstart=").strip()
+        if not lstart:
+            continue
+        t = time.mktime(time.strptime(lstart, "%a %b %d %H:%M:%S %Y"))
+        # rollout filenames embed local start time to the second; allow small skew
+        for skew in (0, -1, 1, -2, 2):
+            stamp = time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(t + skew))
+            hits = glob.glob(f"{CODEX_SESSIONS}/*/*/*/rollout-{stamp}-*.jsonl")
+            if hits:
+                uuid = os.path.basename(hits[0])[len(f"rollout-{stamp}-"):-len(".jsonl")]
+                cwd = None
+                try:
+                    cwd = json.loads(open(hits[0]).readline())["payload"].get("cwd")
+                except Exception:
+                    pass
+                out[uuid] = {"pid": int(pid), "cwd": cwd, "name": names.get(uuid)}
+                break
+    return out
+
+
+def whoami():
+    """Codex exports CODEX_THREAD_ID into every shell it runs; map it to the
+    thread name. Claude: walk the parent-pid chain to a registered session."""
+    tid = os.environ.get("CODEX_THREAD_ID")
+    if tid:
+        return ("codex", _thread_names().get(tid) or tid)
+    cl = {v["pid"]: ("claude", k) for k, v in claude_peers().items()}
+    pid = os.getpid()
+    for _ in range(30):
+        if pid in cl:
+            return cl[pid]
+        ppid = _run("ps", "-p", str(pid), "-o", "ppid=").strip()
+        if not ppid or int(ppid) <= 1:
+            break
+        pid = int(ppid)
+    return (None, None)
+
+
+def armed(handle):
+    """Is a Claude session tailing this inbox right now?"""
+    return bool(_run("pgrep", "-f", f"tail -F -n 0 {INBOX}/{handle}.inbox").strip())
+
+
+def send(handle, msg, frm=None):
+    me = frm or whoami()[1]
+    if not me:
+        sys.exit("bridge: cannot tell who you are; send with --from <your handle> "
+                 "(Codex: your thread name, see `bridge list`)")
+    tag = f"[{me}]"
+    if handle in claude_peers():
+        INBOX.mkdir(exist_ok=True)
+        f = INBOX / f"{handle}.inbox"
+        with open(f, "a") as fh:
+            fh.write(f"{tag} {msg}\n")
+        if armed(handle):
+            print(f"delivered to claude:{handle}, session is listening")
+        else:
+            print(f"queued for claude:{handle} in {f}; that session has NOT armed its "
+                  f"inbox, it will see this on its next `bridge inbox`")
+        return
+    # anything else: hand it to codex as a thread name or uuid
+    r = subprocess.run(["codex", "queue", "--thread", handle, "--message", f"{tag} {msg}"],
+                       capture_output=True, text=True)
+    sys.stdout.write(r.stdout or r.stderr)
+    sys.exit(r.returncode)
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "list"
+    if cmd == "whoami":
+        kind, name = whoami()
+        print(f"{kind}:{name}" if name else "unknown: pass --from <your handle> when sending")
+    elif cmd == "list":
+        print("CLAUDE (message by name):")
+        for n, d in sorted(claude_peers().items()):
+            print(f"  {n:<24} {d['status']:<8} {'armed' if armed(n) else 'not armed':<10} {d['cwd']}")
+        print("CODEX (message by thread name or uuid):")
+        for u, d in codex_peers().items():
+            print(f"  {(d.get('name') or u):<24} {d['cwd']}")
+            if d.get("name"):
+                print(f"    uuid: {u}")
+    elif cmd == "inbox":
+        me = sys.argv[2] if len(sys.argv) > 2 else whoami()[1]
+        f = INBOX / f"{me}.inbox"
+        sys.stdout.write(f.read_text() if f.exists() else "")
+    elif cmd == "send":
+        args = sys.argv[2:]
+        frm = None
+        if "--from" in args:
+            i = args.index("--from")
+            frm = args[i + 1]
+            del args[i:i + 2]
+        if len(args) < 2:
+            sys.exit("usage: bridge send [--from <handle>] <handle> <message>")
+        send(args[0], " ".join(args[1:]), frm)
+    else:
+        sys.exit(__doc__ + "\nusage: bridge [whoami|list|inbox|send [--from <you>] <handle> <msg>]")
+
+
+if __name__ == "__main__":
+    main()
