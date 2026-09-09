@@ -13,9 +13,6 @@ Copy this into Claude Code or Codex:
 Read https://github.com/ishu86/bridge and follow its SKILL.md to set up messaging between my running Claude Code and Codex sessions.
 ```
 
-The repository is currently private. Your agent needs authenticated GitHub
-access to read it.
-
 ## Setup
 
 From a local checkout, run:
