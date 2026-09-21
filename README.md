@@ -1,9 +1,8 @@
 # Bridge
 
-Let Claude Code, Codex, and Cursor Agent talk to each other.
+Let Claude Code, Codex, and Cursor talk to each other on your machine.
 
-Plan in Codex. Hand work to Claude or Cursor. Get questions and results
-back in the same session, without copying messages between windows.
+Plan in one agent, hand work to another, get the answer back. No copy-paste.
 
 ## Try it with your agent
 
