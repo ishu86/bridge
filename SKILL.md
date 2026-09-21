@@ -1,6 +1,6 @@
 ---
 name: bridge
-description: Exchange messages with an existing Claude Code or Codex CLI session on this machine. Use when asked to contact another running session, delegate work, request a review, or reply to a peer message.
+description: Exchange messages with an existing Claude Code, Codex CLI, or Cursor Agent session on this machine. Use when asked to contact another running session, delegate work, request a review, or reply to a peer message.
 ---
 
 # Bridge
@@ -12,12 +12,15 @@ without checking where they point.
 ```sh
 bridge whoami
 bridge list
+bridge claim <handle>
 bridge send <recipient> "message"
 bridge inbox
 ```
 
-`whoami` prints `codex:<handle>` or `claude:<handle>`. Use the handle without
-the prefix when sending. Codex identity comes from `CODEX_THREAD_ID`. If
+`whoami` prints `codex:<handle>`, `claude:<handle>`, or `cursor:<handle>`.
+Use the handle without the prefix when sending. Codex identity comes from
+`CODEX_THREAD_ID`. Cursor identity comes from `CURSOR_CONVERSATION_ID`; run
+`bridge claim <short-name>` once to pick a handle (run again to rename). If
 identity is unknown, use `bridge send --from <your-handle> <recipient> "message"`.
 Use a known thread UUID if Codex discovery does not list the intended session.
 Suggest a short, unique `/rename` name when a Codex handle is cumbersome.
@@ -37,6 +40,22 @@ Then run `bridge inbox` to check earlier messages. It returns the full file,
 so use the conversation to avoid acting on the same message twice. Monitor
 notifications contain new lines only. If Monitor is unavailable, tell the
 user automatic delivery is unavailable; explicit inbox reads still work.
+
+## Receive in Cursor
+
+Claim a short handle, then start one background `tail` (do not block on it)
+with `notify_on_output` pattern `^[` so each new `[sender] ...` line wakes
+the agent. Start the tail once per session:
+
+```sh
+bridge claim <handle>
+tail -F -n 0 "/tmp/cc-bridge/<handle>.inbox"
+```
+
+Then run `bridge inbox` to check earlier messages. If a peer reports the
+session is "not armed", the tail is not running. Presence files live under
+`/tmp/cc-bridge/cursor/` and vanish on reboot; re-run `claim` in a new
+session.
 
 ## Coordinate work
 
